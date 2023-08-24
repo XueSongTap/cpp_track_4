@@ -1,0 +1,1416 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="710" onload="init(evt)" viewBox="0 0 1200 710" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				clearzoom();
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="710.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="693" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="693" > </text>
+<g id="frames">
+<g >
+<title>zmq::ypipe_t&lt;zmq::msg_t, 256&gt;::check_read (1 samples, 0.02%)</title><rect x="81.8" y="421" width="0.2" height="15.0" fill="rgb(235,152,9)" rx="2" ry="2" />
+<text  x="84.80" y="431.5" ></text>
+</g>
+<g >
+<title>finish_task_switch (1 samples, 0.02%)</title><rect x="870.1" y="341" width="0.3" height="15.0" fill="rgb(246,35,25)" rx="2" ry="2" />
+<text  x="873.12" y="351.5" ></text>
+</g>
+<g >
+<title>zmq::ypipe_t&lt;zmq::command_t, 16&gt;::write (1 samples, 0.02%)</title><rect x="1186.8" y="421" width="0.2" height="15.0" fill="rgb(248,55,49)" rx="2" ry="2" />
+<text  x="1189.78" y="431.5" ></text>
+</g>
+<g >
+<title>do_sys_poll (1 samples, 0.02%)</title><rect x="80.3" y="469" width="0.3" height="15.0" fill="rgb(241,169,5)" rx="2" ry="2" />
+<text  x="83.31" y="479.5" ></text>
+</g>
+<g >
+<title>ep_poll (8 samples, 0.17%)</title><rect x="77.6" y="517" width="2.0" height="15.0" fill="rgb(235,108,0)" rx="2" ry="2" />
+<text  x="80.59" y="527.5" ></text>
+</g>
+<g >
+<title>zmq::ypipe_t&lt;zmq::msg_t, 256&gt;::write (1 samples, 0.02%)</title><rect x="1188.3" y="501" width="0.2" height="15.0" fill="rgb(235,146,21)" rx="2" ry="2" />
+<text  x="1191.27" y="511.5" ></text>
+</g>
+<g >
+<title>zmq::pipe_t::process_activate_read (5 samples, 0.10%)</title><rect x="81.1" y="533" width="1.2" height="15.0" fill="rgb(246,103,3)" rx="2" ry="2" />
+<text  x="84.06" y="543.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (9 samples, 0.19%)</title><rect x="77.3" y="549" width="2.3" height="15.0" fill="rgb(239,69,42)" rx="2" ry="2" />
+<text  x="80.34" y="559.5" ></text>
+</g>
+<g >
+<title>zmq::v2_decoder_t::size_ready (1 samples, 0.02%)</title><rect x="82.5" y="501" width="0.3" height="15.0" fill="rgb(208,3,19)" rx="2" ry="2" />
+<text  x="85.54" y="511.5" ></text>
+</g>
+<g >
+<title>zmq::object_t::process_command (5 samples, 0.10%)</title><rect x="81.1" y="549" width="1.2" height="15.0" fill="rgb(225,206,16)" rx="2" ry="2" />
+<text  x="84.06" y="559.5" ></text>
+</g>
+<g >
+<title>copy_user_generic_unrolled (1 samples, 0.02%)</title><rect x="80.3" y="453" width="0.3" height="15.0" fill="rgb(214,158,45)" rx="2" ry="2" />
+<text  x="83.31" y="463.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (2 samples, 0.04%)</title><rect x="869.9" y="469" width="0.5" height="15.0" fill="rgb(227,163,44)" rx="2" ry="2" />
+<text  x="872.87" y="479.5" ></text>
+</g>
+<g >
+<title>zmq::socket_base_t::recv (9 samples, 0.19%)</title><rect x="868.1" y="549" width="2.3" height="15.0" fill="rgb(238,44,48)" rx="2" ry="2" />
+<text  x="871.14" y="559.5" ></text>
+</g>
+<g >
+<title>tcp_rcv_established (266 samples, 5.58%)</title><rect x="11.0" y="117" width="65.8" height="15.0" fill="rgb(227,117,46)" rx="2" ry="2" />
+<text  x="13.99" y="127.5" >tcp_rcv..</text>
+</g>
+<g >
+<title>rh_timer_func (1 samples, 0.02%)</title><rect x="867.6" y="469" width="0.3" height="15.0" fill="rgb(209,102,24)" rx="2" ry="2" />
+<text  x="870.64" y="479.5" ></text>
+</g>
+<g >
+<title>zmq_msg_init_buffer@plt (1 samples, 0.02%)</title><rect x="867.9" y="581" width="0.2" height="15.0" fill="rgb(236,178,50)" rx="2" ry="2" />
+<text  x="870.89" y="591.5" ></text>
+</g>
+<g >
+<title>zmq::ctx_t::send_command (1 samples, 0.02%)</title><rect x="81.6" y="389" width="0.2" height="15.0" fill="rgb(218,194,27)" rx="2" ry="2" />
+<text  x="84.55" y="399.5" ></text>
+</g>
+<g >
+<title>__vfs_write (240 samples, 5.04%)</title><rect x="83.3" y="357" width="59.4" height="15.0" fill="rgb(220,201,5)" rx="2" ry="2" />
+<text  x="86.29" y="367.5" >__vfs_..</text>
+</g>
+<g >
+<title>zmq::session_base_t::flush (243 samples, 5.10%)</title><rect x="83.0" y="533" width="60.2" height="15.0" fill="rgb(239,98,14)" rx="2" ry="2" />
+<text  x="86.04" y="543.5" >zmq::s..</text>
+</g>
+<g >
+<title>std::atomic&lt;zmq::msg_t*&gt;::compare_exchange_strong (1 samples, 0.02%)</title><rect x="82.0" y="373" width="0.3" height="15.0" fill="rgb(247,76,20)" rx="2" ry="2" />
+<text  x="85.05" y="383.5" ></text>
+</g>
+<g >
+<title>std::less&lt;zmq::blob_t&gt;::operator (1 samples, 0.02%)</title><rect x="868.9" y="437" width="0.2" height="15.0" fill="rgb(241,171,16)" rx="2" ry="2" />
+<text  x="871.88" y="447.5" ></text>
+</g>
+<g >
+<title>zmq::pipe_t::check_hwm (1 samples, 0.02%)</title><rect x="868.6" y="501" width="0.3" height="15.0" fill="rgb(235,98,46)" rx="2" ry="2" />
+<text  x="871.63" y="511.5" ></text>
+</g>
+<g >
+<title>sock_sendmsg (270 samples, 5.67%)</title><rect x="10.2" y="549" width="66.9" height="15.0" fill="rgb(242,229,33)" rx="2" ry="2" />
+<text  x="13.25" y="559.5" >sock_se..</text>
+</g>
+<g >
+<title>apic_timer_interrupt (2 samples, 0.04%)</title><rect x="867.4" y="565" width="0.5" height="15.0" fill="rgb(248,110,38)" rx="2" ry="2" />
+<text  x="870.39" y="575.5" ></text>
+</g>
+<g >
+<title>zmq::v2_decoder_t::flags_ready (1 samples, 0.02%)</title><rect x="82.3" y="517" width="0.2" height="15.0" fill="rgb(206,30,15)" rx="2" ry="2" />
+<text  x="85.30" y="527.5" ></text>
+</g>
+<g >
+<title>sys_poll (2 samples, 0.04%)</title><rect x="869.9" y="453" width="0.5" height="15.0" fill="rgb(221,111,10)" rx="2" ry="2" />
+<text  x="872.87" y="463.5" ></text>
+</g>
+<g >
+<title>tcp_sendmsg_locked (270 samples, 5.67%)</title><rect x="10.2" y="501" width="66.9" height="15.0" fill="rgb(232,2,20)" rx="2" ry="2" />
+<text  x="13.25" y="511.5" >tcp_sen..</text>
+</g>
+<g >
+<title>finish_task_switch (5 samples, 0.10%)</title><rect x="78.1" y="437" width="1.2" height="15.0" fill="rgb(222,158,48)" rx="2" ry="2" />
+<text  x="81.09" y="447.5" ></text>
+</g>
+<g >
+<title>zmq::router_t::xsend (3 samples, 0.06%)</title><rect x="868.4" y="517" width="0.7" height="15.0" fill="rgb(221,49,46)" rx="2" ry="2" />
+<text  x="871.38" y="527.5" ></text>
+</g>
+<g >
+<title>__GI___libc_write (240 samples, 5.04%)</title><rect x="83.3" y="437" width="59.4" height="15.0" fill="rgb(245,153,9)" rx="2" ry="2" />
+<text  x="86.29" y="447.5" >__GI__..</text>
+</g>
+<g >
+<title>std::vector&lt;zmq::i_mailbox*, std::allocator&lt;zmq::i_mailbox*&gt; &gt;::operator[] (1 samples, 0.02%)</title><rect x="872.6" y="437" width="0.2" height="15.0" fill="rgb(222,105,37)" rx="2" ry="2" />
+<text  x="875.59" y="447.5" ></text>
+</g>
+<g >
+<title>tcp_sendmsg (270 samples, 5.67%)</title><rect x="10.2" y="517" width="66.9" height="15.0" fill="rgb(218,11,29)" rx="2" ry="2" />
+<text  x="13.25" y="527.5" >tcp_sen..</text>
+</g>
+<g >
+<title>__softirqentry_text_start (267 samples, 5.60%)</title><rect x="11.0" y="293" width="66.1" height="15.0" fill="rgb(238,73,29)" rx="2" ry="2" />
+<text  x="13.99" y="303.5" >__softi..</text>
+</g>
+<g >
+<title>__libc_start_main (4,228 samples, 88.71%)</title><rect x="143.2" y="613" width="1046.8" height="15.0" fill="rgb(237,5,12)" rx="2" ry="2" />
+<text  x="146.20" y="623.5" >__libc_start_main</text>
+</g>
+<g >
+<title>__vfs_write (1 samples, 0.02%)</title><rect x="872.8" y="357" width="0.3" height="15.0" fill="rgb(224,193,3)" rx="2" ry="2" />
+<text  x="875.84" y="367.5" ></text>
+</g>
+<g >
+<title>zmq::object_t::send_command (1 samples, 0.02%)</title><rect x="142.7" y="501" width="0.3" height="15.0" fill="rgb(206,42,1)" rx="2" ry="2" />
+<text  x="145.71" y="511.5" ></text>
+</g>
+<g >
+<title>sys_write (1 samples, 0.02%)</title><rect x="81.6" y="309" width="0.2" height="15.0" fill="rgb(214,44,13)" rx="2" ry="2" />
+<text  x="84.55" y="319.5" ></text>
+</g>
+<g >
+<title>schedule (5 samples, 0.10%)</title><rect x="78.1" y="469" width="1.2" height="15.0" fill="rgb(229,28,49)" rx="2" ry="2" />
+<text  x="81.09" y="479.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (1 samples, 0.02%)</title><rect x="76.8" y="165" width="0.3" height="15.0" fill="rgb(235,103,5)" rx="2" ry="2" />
+<text  x="79.85" y="175.5" ></text>
+</g>
+<g >
+<title>schedule (1 samples, 0.02%)</title><rect x="870.1" y="373" width="0.3" height="15.0" fill="rgb(231,82,10)" rx="2" ry="2" />
+<text  x="873.12" y="383.5" ></text>
+</g>
+<g >
+<title>inet_sendmsg (270 samples, 5.67%)</title><rect x="10.2" y="533" width="66.9" height="15.0" fill="rgb(243,174,43)" rx="2" ry="2" />
+<text  x="13.25" y="543.5" >inet_se..</text>
+</g>
+<g >
+<title>ipv4_conntrack_local (1 samples, 0.02%)</title><rect x="10.5" y="373" width="0.2" height="15.0" fill="rgb(247,73,22)" rx="2" ry="2" />
+<text  x="13.50" y="383.5" ></text>
+</g>
+<g >
+<title>eventfd_write (1,262 samples, 26.48%)</title><rect x="873.1" y="325" width="312.4" height="15.0" fill="rgb(213,165,54)" rx="2" ry="2" />
+<text  x="876.09" y="335.5" >eventfd_write</text>
+</g>
+<g >
+<title>zmq_recv (9 samples, 0.19%)</title><rect x="868.1" y="581" width="2.3" height="15.0" fill="rgb(246,12,4)" rx="2" ry="2" />
+<text  x="871.14" y="591.5" ></text>
+</g>
+<g >
+<title>vfs_write (1 samples, 0.02%)</title><rect x="81.6" y="293" width="0.2" height="15.0" fill="rgb(240,128,37)" rx="2" ry="2" />
+<text  x="84.55" y="303.5" ></text>
+</g>
+<g >
+<title>aa_sk_perm (1 samples, 0.02%)</title><rect x="10.0" y="485" width="0.2" height="15.0" fill="rgb(240,203,11)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" ></text>
+</g>
+<g >
+<title>sys_sendto (271 samples, 5.69%)</title><rect x="10.2" y="581" width="67.1" height="15.0" fill="rgb(226,194,4)" rx="2" ry="2" />
+<text  x="13.25" y="591.5" >sys_sen..</text>
+</g>
+<g >
+<title>ip_rcv (267 samples, 5.60%)</title><rect x="11.0" y="213" width="66.1" height="15.0" fill="rgb(250,127,16)" rx="2" ry="2" />
+<text  x="13.99" y="223.5" >ip_rcv</text>
+</g>
+<g >
+<title>aa_sock_msg_perm (1 samples, 0.02%)</title><rect x="10.0" y="501" width="0.2" height="15.0" fill="rgb(244,68,49)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (9 samples, 0.19%)</title><rect x="77.3" y="565" width="2.3" height="15.0" fill="rgb(249,98,14)" rx="2" ry="2" />
+<text  x="80.34" y="575.5" ></text>
+</g>
+<g >
+<title>sys_write (1,264 samples, 26.52%)</title><rect x="872.8" y="373" width="313.0" height="15.0" fill="rgb(212,154,23)" rx="2" ry="2" />
+<text  x="875.84" y="383.5" >sys_write</text>
+</g>
+<g >
+<title>zmq::ypipe_t&lt;zmq::msg_t, 256&gt;::flush (1 samples, 0.02%)</title><rect x="143.0" y="501" width="0.2" height="15.0" fill="rgb(211,90,34)" rx="2" ry="2" />
+<text  x="145.95" y="511.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (271 samples, 5.69%)</title><rect x="10.2" y="613" width="67.1" height="15.0" fill="rgb(253,2,24)" rx="2" ry="2" />
+<text  x="13.25" y="623.5" >entry_S..</text>
+</g>
+<g >
+<title>zmq::pipe_t::write (2 samples, 0.04%)</title><rect x="871.1" y="517" width="0.5" height="15.0" fill="rgb(240,194,48)" rx="2" ry="2" />
+<text  x="874.11" y="527.5" ></text>
+</g>
+<g >
+<title>zmq::object_t::send_activate_write (1 samples, 0.02%)</title><rect x="81.6" y="421" width="0.2" height="15.0" fill="rgb(235,193,53)" rx="2" ry="2" />
+<text  x="84.55" y="431.5" ></text>
+</g>
+<g >
+<title>std::atomic&lt;zmq::msg_t*&gt;::operator= (1 samples, 0.02%)</title><rect x="1187.5" y="453" width="0.3" height="15.0" fill="rgb(228,106,36)" rx="2" ry="2" />
+<text  x="1190.52" y="463.5" ></text>
+</g>
+<g >
+<title>__memcmp_sse4_1 (1 samples, 0.02%)</title><rect x="868.9" y="421" width="0.2" height="15.0" fill="rgb(227,167,16)" rx="2" ry="2" />
+<text  x="871.88" y="431.5" ></text>
+</g>
+<g >
+<title>sock_recvmsg (1 samples, 0.02%)</title><rect x="10.0" y="549" width="0.2" height="15.0" fill="rgb(243,5,48)" rx="2" ry="2" />
+<text  x="13.00" y="559.5" ></text>
+</g>
+<g >
+<title>s_sendmsg (1,287 samples, 27.00%)</title><rect x="870.6" y="565" width="318.7" height="15.0" fill="rgb(234,55,50)" rx="2" ry="2" />
+<text  x="873.61" y="575.5" >s_sendmsg</text>
+</g>
+<g >
+<title>zmq::socket_base_t::extract_flags (1 samples, 0.02%)</title><rect x="869.1" y="533" width="0.3" height="15.0" fill="rgb(245,54,54)" rx="2" ry="2" />
+<text  x="872.13" y="543.5" ></text>
+</g>
+<g >
+<title>zmq::socket_base_t::send (1,286 samples, 26.98%)</title><rect x="870.9" y="549" width="318.4" height="15.0" fill="rgb(206,227,14)" rx="2" ry="2" />
+<text  x="873.86" y="559.5" >zmq::socket_base_t::send</text>
+</g>
+<g >
+<title>__vfs_write (1,262 samples, 26.48%)</title><rect x="873.1" y="341" width="312.4" height="15.0" fill="rgb(206,2,16)" rx="2" ry="2" />
+<text  x="876.09" y="351.5" >__vfs_write</text>
+</g>
+<g >
+<title>net_rx_action (267 samples, 5.60%)</title><rect x="11.0" y="277" width="66.1" height="15.0" fill="rgb(242,205,5)" rx="2" ry="2" />
+<text  x="13.99" y="287.5" >net_rx_..</text>
+</g>
+<g >
+<title>zmq::object_t::send_activate_read (241 samples, 5.06%)</title><rect x="83.0" y="501" width="59.7" height="15.0" fill="rgb(232,81,45)" rx="2" ry="2" />
+<text  x="86.04" y="511.5" >zmq::o..</text>
+</g>
+<g >
+<title>zmq::socket_base_t::check_tag (1 samples, 0.02%)</title><rect x="1189.3" y="565" width="0.2" height="15.0" fill="rgb(218,104,5)" rx="2" ry="2" />
+<text  x="1192.26" y="575.5" ></text>
+</g>
+<g >
+<title>zmq::v2_decoder_t::one_byte_size_ready (1 samples, 0.02%)</title><rect x="82.5" y="517" width="0.3" height="15.0" fill="rgb(239,99,20)" rx="2" ry="2" />
+<text  x="85.54" y="527.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range_clock (5 samples, 0.10%)</title><rect x="78.1" y="485" width="1.2" height="15.0" fill="rgb(228,200,0)" rx="2" ry="2" />
+<text  x="81.09" y="495.5" ></text>
+</g>
+<g >
+<title>ep_scan_ready_list (1 samples, 0.02%)</title><rect x="77.8" y="501" width="0.3" height="15.0" fill="rgb(233,79,3)" rx="2" ry="2" />
+<text  x="80.84" y="511.5" ></text>
+</g>
+<g >
+<title>__wake_up_sync_key (266 samples, 5.58%)</title><rect x="11.0" y="69" width="65.8" height="15.0" fill="rgb(239,180,41)" rx="2" ry="2" />
+<text  x="13.99" y="79.5" >__wake_..</text>
+</g>
+<g >
+<title>tcp_write_xmit (270 samples, 5.67%)</title><rect x="10.2" y="453" width="66.9" height="15.0" fill="rgb(239,220,33)" rx="2" ry="2" />
+<text  x="13.25" y="463.5" >tcp_wri..</text>
+</g>
+<g >
+<title>hwserver (4,228 samples, 88.71%)</title><rect x="143.2" y="645" width="1046.8" height="15.0" fill="rgb(213,27,8)" rx="2" ry="2" />
+<text  x="146.20" y="655.5" >hwserver</text>
+</g>
+<g >
+<title>func_c (2,927 samples, 61.41%)</title><rect x="143.2" y="581" width="724.7" height="15.0" fill="rgb(216,129,22)" rx="2" ry="2" />
+<text  x="146.20" y="591.5" >func_c</text>
+</g>
+<g >
+<title>poll@plt (1 samples, 0.02%)</title><rect x="80.6" y="533" width="0.2" height="15.0" fill="rgb(225,203,42)" rx="2" ry="2" />
+<text  x="83.56" y="543.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (1 samples, 0.02%)</title><rect x="80.3" y="501" width="0.3" height="15.0" fill="rgb(240,170,32)" rx="2" ry="2" />
+<text  x="83.31" y="511.5" ></text>
+</g>
+<g >
+<title>zmq::pipe_t::flush (243 samples, 5.10%)</title><rect x="83.0" y="517" width="60.2" height="15.0" fill="rgb(228,198,24)" rx="2" ry="2" />
+<text  x="86.04" y="527.5" >zmq::p..</text>
+</g>
+<g >
+<title>ip_output (268 samples, 5.62%)</title><rect x="10.7" y="389" width="66.4" height="15.0" fill="rgb(224,70,5)" rx="2" ry="2" />
+<text  x="13.74" y="399.5" >ip_output</text>
+</g>
+<g >
+<title>zmq::msg_t::init (1 samples, 0.02%)</title><rect x="82.5" y="485" width="0.3" height="15.0" fill="rgb(237,166,36)" rx="2" ry="2" />
+<text  x="85.54" y="495.5" ></text>
+</g>
+<g >
+<title>zmq::ypipe_t&lt;zmq::msg_t, 256&gt;::flush (1 samples, 0.02%)</title><rect x="1187.5" y="485" width="0.3" height="15.0" fill="rgb(207,157,9)" rx="2" ry="2" />
+<text  x="1190.52" y="495.5" ></text>
+</g>
+<g >
+<title>zmq_send (1,290 samples, 27.07%)</title><rect x="870.4" y="581" width="319.4" height="15.0" fill="rgb(212,197,32)" rx="2" ry="2" />
+<text  x="873.37" y="591.5" >zmq_send</text>
+</g>
+<g >
+<title>SYSC_sendto (271 samples, 5.69%)</title><rect x="10.2" y="565" width="67.1" height="15.0" fill="rgb(219,60,25)" rx="2" ry="2" />
+<text  x="13.25" y="575.5" >SYSC_se..</text>
+</g>
+<g >
+<title>__fdget (1 samples, 0.02%)</title><rect x="77.1" y="533" width="0.2" height="15.0" fill="rgb(231,58,36)" rx="2" ry="2" />
+<text  x="80.10" y="543.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (2 samples, 0.04%)</title><rect x="1185.8" y="421" width="0.5" height="15.0" fill="rgb(216,203,11)" rx="2" ry="2" />
+<text  x="1188.79" y="431.5" ></text>
+</g>
+<g >
+<title>zmq::socket_base_t::process_commands (4 samples, 0.08%)</title><rect x="869.4" y="533" width="1.0" height="15.0" fill="rgb(211,157,11)" rx="2" ry="2" />
+<text  x="872.37" y="543.5" ></text>
+</g>
+<g >
+<title>zmq::rep_t::xsend (1,282 samples, 26.90%)</title><rect x="871.1" y="533" width="317.4" height="15.0" fill="rgb(205,115,27)" rx="2" ry="2" />
+<text  x="874.11" y="543.5" >zmq::rep_t::xsend</text>
+</g>
+<g >
+<title>process_backlog (267 samples, 5.60%)</title><rect x="11.0" y="261" width="66.1" height="15.0" fill="rgb(207,7,33)" rx="2" ry="2" />
+<text  x="13.99" y="271.5" >process..</text>
+</g>
+<g >
+<title>zmq::msg_t::data (1 samples, 0.02%)</title><rect x="81.3" y="437" width="0.3" height="15.0" fill="rgb(210,44,41)" rx="2" ry="2" />
+<text  x="84.31" y="447.5" ></text>
+</g>
+<g >
+<title>zmq::v3_1_encoder_t::size_ready (1 samples, 0.02%)</title><rect x="81.3" y="453" width="0.3" height="15.0" fill="rgb(221,217,30)" rx="2" ry="2" />
+<text  x="84.31" y="463.5" ></text>
+</g>
+<g >
+<title>irq_exit (2 samples, 0.04%)</title><rect x="867.4" y="533" width="0.5" height="15.0" fill="rgb(230,198,14)" rx="2" ry="2" />
+<text  x="870.39" y="543.5" ></text>
+</g>
+<g >
+<title>zmq::stream_engine_base_t::in_event (246 samples, 5.16%)</title><rect x="82.3" y="565" width="60.9" height="15.0" fill="rgb(252,226,0)" rx="2" ry="2" />
+<text  x="85.30" y="575.5" >zmq::s..</text>
+</g>
+<g >
+<title>__fget (1 samples, 0.02%)</title><rect x="77.1" y="501" width="0.2" height="15.0" fill="rgb(230,99,13)" rx="2" ry="2" />
+<text  x="80.10" y="511.5" ></text>
+</g>
+<g >
+<title>zmq::router_t::xrecv (1 samples, 0.02%)</title><rect x="868.1" y="517" width="0.3" height="15.0" fill="rgb(228,58,28)" rx="2" ry="2" />
+<text  x="871.14" y="527.5" ></text>
+</g>
+<g >
+<title>ep_send_events_proc (1 samples, 0.02%)</title><rect x="77.8" y="485" width="0.3" height="15.0" fill="rgb(237,46,7)" rx="2" ry="2" />
+<text  x="80.84" y="495.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;zmq::epoll_t::poll_entry_t*, std::allocator&lt;zmq::epoll_t::poll_entry_t*&gt; &gt;::_M_erase_at_end (1 samples, 0.02%)</title><rect x="80.1" y="549" width="0.2" height="15.0" fill="rgb(208,83,21)" rx="2" ry="2" />
+<text  x="83.07" y="559.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range (1 samples, 0.02%)</title><rect x="870.1" y="405" width="0.3" height="15.0" fill="rgb(219,26,3)" rx="2" ry="2" />
+<text  x="873.12" y="415.5" ></text>
+</g>
+<g >
+<title>zmq::mailbox_t::send (1,269 samples, 26.63%)</title><rect x="872.8" y="437" width="314.2" height="15.0" fill="rgb(220,40,0)" rx="2" ry="2" />
+<text  x="875.84" y="447.5" >zmq::mailbox_t::send</text>
+</g>
+<g >
+<title>__libc_recv (1 samples, 0.02%)</title><rect x="10.0" y="629" width="0.2" height="15.0" fill="rgb(250,225,20)" rx="2" ry="2" />
+<text  x="13.00" y="639.5" ></text>
+</g>
+<g >
+<title>std::atomic&lt;zmq::command_t*&gt;::operator= (1 samples, 0.02%)</title><rect x="1186.5" y="389" width="0.3" height="15.0" fill="rgb(210,107,38)" rx="2" ry="2" />
+<text  x="1189.53" y="399.5" ></text>
+</g>
+<g >
+<title>SYSC_recvfrom (1 samples, 0.02%)</title><rect x="10.0" y="565" width="0.2" height="15.0" fill="rgb(207,75,1)" rx="2" ry="2" />
+<text  x="13.00" y="575.5" ></text>
+</g>
+<g >
+<title>zmq::msg_t::flags (1 samples, 0.02%)</title><rect x="869.1" y="517" width="0.3" height="15.0" fill="rgb(232,14,27)" rx="2" ry="2" />
+<text  x="872.13" y="527.5" ></text>
+</g>
+<g >
+<title>thread_routine (266 samples, 5.58%)</title><rect x="77.3" y="613" width="65.9" height="15.0" fill="rgb(209,112,24)" rx="2" ry="2" />
+<text  x="80.34" y="623.5" >thread_..</text>
+</g>
+<g >
+<title>do_syscall_64 (1 samples, 0.02%)</title><rect x="10.0" y="597" width="0.2" height="15.0" fill="rgb(207,54,20)" rx="2" ry="2" />
+<text  x="13.00" y="607.5" ></text>
+</g>
+<g >
+<title>__lock_text_start (1 samples, 0.02%)</title><rect x="867.6" y="421" width="0.3" height="15.0" fill="rgb(253,215,50)" rx="2" ry="2" />
+<text  x="870.64" y="431.5" ></text>
+</g>
+<g >
+<title>tcp_v4_do_rcv (266 samples, 5.58%)</title><rect x="11.0" y="133" width="65.8" height="15.0" fill="rgb(228,75,4)" rx="2" ry="2" />
+<text  x="13.99" y="143.5" >tcp_v4_..</text>
+</g>
+<g >
+<title>do_syscall_64 (240 samples, 5.04%)</title><rect x="83.3" y="405" width="59.4" height="15.0" fill="rgb(242,174,2)" rx="2" ry="2" />
+<text  x="86.29" y="415.5" >do_sys..</text>
+</g>
+<g >
+<title>run_timer_softirq (2 samples, 0.04%)</title><rect x="867.4" y="501" width="0.5" height="15.0" fill="rgb(235,223,30)" rx="2" ry="2" />
+<text  x="870.39" y="511.5" ></text>
+</g>
+<g >
+<title>zmq::epoll_t::loop (257 samples, 5.39%)</title><rect x="79.6" y="581" width="63.6" height="15.0" fill="rgb(217,203,1)" rx="2" ry="2" />
+<text  x="82.57" y="591.5" >zmq::e..</text>
+</g>
+<g >
+<title>sockfd_lookup_light (1 samples, 0.02%)</title><rect x="77.1" y="549" width="0.2" height="15.0" fill="rgb(245,148,48)" rx="2" ry="2" />
+<text  x="80.10" y="559.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (1,264 samples, 26.52%)</title><rect x="872.8" y="405" width="313.0" height="15.0" fill="rgb(218,53,5)" rx="2" ry="2" />
+<text  x="875.84" y="415.5" >entry_SYSCALL_64_after_hwframe</text>
+</g>
+<g >
+<title>__netif_receive_skb (267 samples, 5.60%)</title><rect x="11.0" y="245" width="66.1" height="15.0" fill="rgb(250,89,17)" rx="2" ry="2" />
+<text  x="13.99" y="255.5" >__netif..</text>
+</g>
+<g >
+<title>common_file_perm (1 samples, 0.02%)</title><rect x="1185.5" y="293" width="0.3" height="15.0" fill="rgb(235,135,28)" rx="2" ry="2" />
+<text  x="1188.54" y="303.5" ></text>
+</g>
+<g >
+<title>all (4,766 samples, 100%)</title><rect x="10.0" y="661" width="1180.0" height="15.0" fill="rgb(223,206,41)" rx="2" ry="2" />
+<text  x="13.00" y="671.5" ></text>
+</g>
+<g >
+<title>std::map&lt;zmq::blob_t, zmq::routing_socket_base_t::out_pipe_t, std::less&lt;zmq::blob_t&gt;, std::allocator&lt;std::pair&lt;zmq::blob_t const, zmq::routing_socket_base_t::out_pipe_t&gt; &gt; &gt;::find (1 samples, 0.02%)</title><rect x="868.4" y="501" width="0.2" height="15.0" fill="rgb(244,131,39)" rx="2" ry="2" />
+<text  x="871.38" y="511.5" ></text>
+</g>
+<g >
+<title>zmq::worker_poller_base_t::worker_routine (266 samples, 5.58%)</title><rect x="77.3" y="597" width="65.9" height="15.0" fill="rgb(247,119,26)" rx="2" ry="2" />
+<text  x="80.34" y="607.5" >zmq::wo..</text>
+</g>
+<g >
+<title>zmq::stream_engine_base_t::restart_output (4 samples, 0.08%)</title><rect x="81.3" y="501" width="1.0" height="15.0" fill="rgb(254,18,48)" rx="2" ry="2" />
+<text  x="84.31" y="511.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range_clock (1 samples, 0.02%)</title><rect x="79.3" y="501" width="0.3" height="15.0" fill="rgb(234,72,7)" rx="2" ry="2" />
+<text  x="82.32" y="511.5" ></text>
+</g>
+<g >
+<title>__schedule (5 samples, 0.10%)</title><rect x="78.1" y="453" width="1.2" height="15.0" fill="rgb(213,113,5)" rx="2" ry="2" />
+<text  x="81.09" y="463.5" ></text>
+</g>
+<g >
+<title>zmq::rep_t::xsend (1 samples, 0.02%)</title><rect x="870.6" y="549" width="0.3" height="15.0" fill="rgb(238,185,9)" rx="2" ry="2" />
+<text  x="873.61" y="559.5" ></text>
+</g>
+<g >
+<title>zmq::object_t::send_command (241 samples, 5.06%)</title><rect x="83.0" y="485" width="59.7" height="15.0" fill="rgb(239,113,5)" rx="2" ry="2" />
+<text  x="86.04" y="495.5" >zmq::o..</text>
+</g>
+<g >
+<title>zmq::object_t::send_command (1 samples, 0.02%)</title><rect x="81.6" y="405" width="0.2" height="15.0" fill="rgb(243,141,17)" rx="2" ry="2" />
+<text  x="84.55" y="415.5" ></text>
+</g>
+<g >
+<title>zmq::ctx_t::send_command (1,271 samples, 26.67%)</title><rect x="872.6" y="453" width="314.7" height="15.0" fill="rgb(212,137,2)" rx="2" ry="2" />
+<text  x="875.59" y="463.5" >zmq::ctx_t::send_command</text>
+</g>
+<g >
+<title>zmq::stream_engine_base_t::in_event_internal (246 samples, 5.16%)</title><rect x="82.3" y="549" width="60.9" height="15.0" fill="rgb(233,208,6)" rx="2" ry="2" />
+<text  x="85.30" y="559.5" >zmq::s..</text>
+</g>
+<g >
+<title>sys_write (240 samples, 5.04%)</title><rect x="83.3" y="389" width="59.4" height="15.0" fill="rgb(227,85,34)" rx="2" ry="2" />
+<text  x="86.29" y="399.5" >sys_wr..</text>
+</g>
+<g >
+<title>ip_finish_output2 (268 samples, 5.62%)</title><rect x="10.7" y="357" width="66.4" height="15.0" fill="rgb(235,114,3)" rx="2" ry="2" />
+<text  x="13.74" y="367.5" >ip_fini..</text>
+</g>
+<g >
+<title>zmq::ctx_t::send_command (241 samples, 5.06%)</title><rect x="83.0" y="469" width="59.7" height="15.0" fill="rgb(209,194,15)" rx="2" ry="2" />
+<text  x="86.04" y="479.5" >zmq::c..</text>
+</g>
+<g >
+<title>std::map&lt;zmq::blob_t, zmq::routing_socket_base_t::out_pipe_t, std::less&lt;zmq::blob_t&gt;, std::allocator&lt;std::pair&lt;zmq::blob_t const, zmq::routing_socket_base_t::out_pipe_t&gt; &gt; &gt;::find (1 samples, 0.02%)</title><rect x="868.9" y="485" width="0.2" height="15.0" fill="rgb(251,70,21)" rx="2" ry="2" />
+<text  x="871.88" y="495.5" ></text>
+</g>
+<g >
+<title>tcp_push (270 samples, 5.67%)</title><rect x="10.2" y="485" width="66.9" height="15.0" fill="rgb(216,163,16)" rx="2" ry="2" />
+<text  x="13.25" y="495.5" >tcp_push</text>
+</g>
+<g >
+<title>zmq::object_t::send_command (1 samples, 0.02%)</title><rect x="1187.3" y="485" width="0.2" height="15.0" fill="rgb(217,100,28)" rx="2" ry="2" />
+<text  x="1190.28" y="495.5" ></text>
+</g>
+<g >
+<title>ip_local_deliver_finish (266 samples, 5.58%)</title><rect x="11.0" y="165" width="65.8" height="15.0" fill="rgb(206,159,22)" rx="2" ry="2" />
+<text  x="13.99" y="175.5" >ip_loca..</text>
+</g>
+<g >
+<title>zmq::atomic_ptr_t&lt;zmq::msg_t&gt;::cas (1 samples, 0.02%)</title><rect x="871.9" y="485" width="0.2" height="15.0" fill="rgb(211,143,41)" rx="2" ry="2" />
+<text  x="874.85" y="495.5" ></text>
+</g>
+<g >
+<title>vfs_write (240 samples, 5.04%)</title><rect x="83.3" y="373" width="59.4" height="15.0" fill="rgb(253,55,31)" rx="2" ry="2" />
+<text  x="86.29" y="383.5" >vfs_wr..</text>
+</g>
+<g >
+<title>std::vector&lt;zmq::i_mailbox*, std::allocator&lt;zmq::i_mailbox*&gt; &gt;::operator[] (1 samples, 0.02%)</title><rect x="872.3" y="453" width="0.3" height="15.0" fill="rgb(248,77,5)" rx="2" ry="2" />
+<text  x="875.35" y="463.5" ></text>
+</g>
+<g >
+<title>zmq::mailbox_t::recv (3 samples, 0.06%)</title><rect x="869.6" y="517" width="0.8" height="15.0" fill="rgb(231,0,14)" rx="2" ry="2" />
+<text  x="872.62" y="527.5" ></text>
+</g>
+<g >
+<title>zmq::atomic_ptr_t&lt;zmq::command_t&gt;::cas (1 samples, 0.02%)</title><rect x="80.8" y="501" width="0.3" height="15.0" fill="rgb(230,183,45)" rx="2" ry="2" />
+<text  x="83.81" y="511.5" ></text>
+</g>
+<g >
+<title>[libc-2.23.so] (9 samples, 0.19%)</title><rect x="77.3" y="581" width="2.3" height="15.0" fill="rgb(243,64,2)" rx="2" ry="2" />
+<text  x="80.34" y="591.5" ></text>
+</g>
+<g >
+<title>smp_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="867.4" y="549" width="0.5" height="15.0" fill="rgb(254,140,52)" rx="2" ry="2" />
+<text  x="870.39" y="559.5" ></text>
+</g>
+<g >
+<title>__GI___libc_poll (1 samples, 0.02%)</title><rect x="1188.8" y="501" width="0.2" height="15.0" fill="rgb(241,32,23)" rx="2" ry="2" />
+<text  x="1191.76" y="511.5" ></text>
+</g>
+<g >
+<title>__tcp_transmit_skb (269 samples, 5.64%)</title><rect x="10.5" y="437" width="66.6" height="15.0" fill="rgb(241,25,9)" rx="2" ry="2" />
+<text  x="13.50" y="447.5" >__tcp_t..</text>
+</g>
+<g >
+<title>ZMQbg/IO/0 (538 samples, 11.29%)</title><rect x="10.0" y="645" width="133.2" height="15.0" fill="rgb(254,8,1)" rx="2" ry="2" />
+<text  x="13.00" y="655.5" >ZMQbg/IO/0</text>
+</g>
+<g >
+<title>std::vector&lt;zmq::i_mailbox*, std::allocator&lt;zmq::i_mailbox*&gt; &gt;::operator[] (1 samples, 0.02%)</title><rect x="83.0" y="453" width="0.3" height="15.0" fill="rgb(237,173,28)" rx="2" ry="2" />
+<text  x="86.04" y="463.5" ></text>
+</g>
+<g >
+<title>zmq::router_t::xsend (1,280 samples, 26.86%)</title><rect x="871.6" y="517" width="316.9" height="15.0" fill="rgb(206,215,49)" rx="2" ry="2" />
+<text  x="874.60" y="527.5" >zmq::router_t::xsend</text>
+</g>
+<g >
+<title>zmq::routing_socket_base_t::lookup_out_pipe (1 samples, 0.02%)</title><rect x="868.9" y="501" width="0.2" height="15.0" fill="rgb(244,207,35)" rx="2" ry="2" />
+<text  x="871.88" y="511.5" ></text>
+</g>
+<g >
+<title>std::__atomic_base&lt;zmq::command_t*&gt;::operator= (1 samples, 0.02%)</title><rect x="1186.5" y="373" width="0.3" height="15.0" fill="rgb(247,104,21)" rx="2" ry="2" />
+<text  x="1189.53" y="383.5" ></text>
+</g>
+<g >
+<title>__ip_local_out (1 samples, 0.02%)</title><rect x="10.5" y="389" width="0.2" height="15.0" fill="rgb(206,9,14)" rx="2" ry="2" />
+<text  x="13.50" y="399.5" ></text>
+</g>
+<g >
+<title>security_file_permission (1 samples, 0.02%)</title><rect x="1185.5" y="325" width="0.3" height="15.0" fill="rgb(236,116,12)" rx="2" ry="2" />
+<text  x="1188.54" y="335.5" ></text>
+</g>
+<g >
+<title>zmq::pipe_t::flush (1,276 samples, 26.77%)</title><rect x="871.9" y="501" width="315.9" height="15.0" fill="rgb(215,207,1)" rx="2" ry="2" />
+<text  x="874.85" y="511.5" >zmq::pipe_t::flush</text>
+</g>
+<g >
+<title>zmq::decoder_base_t&lt;zmq::v2_decoder_t, zmq::shared_message_memory_allocator&gt;::decode (2 samples, 0.04%)</title><rect x="82.3" y="533" width="0.5" height="15.0" fill="rgb(252,182,40)" rx="2" ry="2" />
+<text  x="85.30" y="543.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range_clock (1 samples, 0.02%)</title><rect x="870.1" y="389" width="0.3" height="15.0" fill="rgb(237,48,6)" rx="2" ry="2" />
+<text  x="873.12" y="399.5" ></text>
+</g>
+<g >
+<title>security_socket_recvmsg (1 samples, 0.02%)</title><rect x="10.0" y="533" width="0.2" height="15.0" fill="rgb(237,64,29)" rx="2" ry="2" />
+<text  x="13.00" y="543.5" ></text>
+</g>
+<g >
+<title>poll_schedule_timeout (1 samples, 0.02%)</title><rect x="870.1" y="421" width="0.3" height="15.0" fill="rgb(210,69,17)" rx="2" ry="2" />
+<text  x="873.12" y="431.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (1 samples, 0.02%)</title><rect x="80.3" y="517" width="0.3" height="15.0" fill="rgb(237,87,18)" rx="2" ry="2" />
+<text  x="83.31" y="527.5" ></text>
+</g>
+<g >
+<title>poll_freewait (1 samples, 0.02%)</title><rect x="869.9" y="421" width="0.2" height="15.0" fill="rgb(232,192,23)" rx="2" ry="2" />
+<text  x="872.87" y="431.5" ></text>
+</g>
+<g >
+<title>zmq::stream_engine_base_t::pull_and_encode (3 samples, 0.06%)</title><rect x="81.6" y="469" width="0.7" height="15.0" fill="rgb(243,150,29)" rx="2" ry="2" />
+<text  x="84.55" y="479.5" ></text>
+</g>
+<g >
+<title>zmq_send (1 samples, 0.02%)</title><rect x="1189.8" y="597" width="0.2" height="15.0" fill="rgb(219,76,0)" rx="2" ry="2" />
+<text  x="1192.75" y="607.5" ></text>
+</g>
+<g >
+<title>apparmor_file_permission (1 samples, 0.02%)</title><rect x="1185.5" y="309" width="0.3" height="15.0" fill="rgb(235,79,50)" rx="2" ry="2" />
+<text  x="1188.54" y="319.5" ></text>
+</g>
+<g >
+<title>ip_rcv_finish (267 samples, 5.60%)</title><rect x="11.0" y="197" width="66.1" height="15.0" fill="rgb(211,6,13)" rx="2" ry="2" />
+<text  x="13.99" y="207.5" >ip_rcv_..</text>
+</g>
+<g >
+<title>ip_queue_xmit (269 samples, 5.64%)</title><rect x="10.5" y="421" width="66.6" height="15.0" fill="rgb(226,45,1)" rx="2" ry="2" />
+<text  x="13.50" y="431.5" >ip_queu..</text>
+</g>
+<g >
+<title>zmq::socket_base_t::send (1 samples, 0.02%)</title><rect x="1189.5" y="565" width="0.3" height="15.0" fill="rgb(251,29,3)" rx="2" ry="2" />
+<text  x="1192.50" y="575.5" ></text>
+</g>
+<g >
+<title>zmq::object_t::send_activate_read (1,273 samples, 26.71%)</title><rect x="872.1" y="485" width="315.2" height="15.0" fill="rgb(224,114,49)" rx="2" ry="2" />
+<text  x="875.10" y="495.5" >zmq::object_t::send_activate_read</text>
+</g>
+<g >
+<title>zmq::mechanism_t::decode (1 samples, 0.02%)</title><rect x="82.8" y="533" width="0.2" height="15.0" fill="rgb(214,159,16)" rx="2" ry="2" />
+<text  x="85.79" y="543.5" ></text>
+</g>
+<g >
+<title>zmq::fq_t::recvpipe (1 samples, 0.02%)</title><rect x="868.1" y="501" width="0.3" height="15.0" fill="rgb(222,64,33)" rx="2" ry="2" />
+<text  x="871.14" y="511.5" ></text>
+</g>
+<g >
+<title>sys_poll (1 samples, 0.02%)</title><rect x="80.3" y="485" width="0.3" height="15.0" fill="rgb(227,203,34)" rx="2" ry="2" />
+<text  x="83.31" y="495.5" ></text>
+</g>
+<g >
+<title>do_softirq.part.17 (267 samples, 5.60%)</title><rect x="11.0" y="325" width="66.1" height="15.0" fill="rgb(212,69,17)" rx="2" ry="2" />
+<text  x="13.99" y="335.5" >do_soft..</text>
+</g>
+<g >
+<title>sys_recvfrom (1 samples, 0.02%)</title><rect x="10.0" y="581" width="0.2" height="15.0" fill="rgb(225,21,48)" rx="2" ry="2" />
+<text  x="13.00" y="591.5" ></text>
+</g>
+<g >
+<title>do_sys_poll (2 samples, 0.04%)</title><rect x="869.9" y="437" width="0.5" height="15.0" fill="rgb(221,71,43)" rx="2" ry="2" />
+<text  x="872.87" y="447.5" ></text>
+</g>
+<g >
+<title>zmq::mailbox_t::recv (2 samples, 0.04%)</title><rect x="1188.8" y="517" width="0.5" height="15.0" fill="rgb(232,191,40)" rx="2" ry="2" />
+<text  x="1191.76" y="527.5" ></text>
+</g>
+<g >
+<title>sock_def_readable (266 samples, 5.58%)</title><rect x="11.0" y="85" width="65.8" height="15.0" fill="rgb(253,193,41)" rx="2" ry="2" />
+<text  x="13.99" y="95.5" >sock_de..</text>
+</g>
+<g >
+<title>tcp_data_queue (266 samples, 5.58%)</title><rect x="11.0" y="101" width="65.8" height="15.0" fill="rgb(246,58,44)" rx="2" ry="2" />
+<text  x="13.99" y="111.5" >tcp_dat..</text>
+</g>
+<g >
+<title>do_syscall_64 (1,264 samples, 26.52%)</title><rect x="872.8" y="389" width="313.0" height="15.0" fill="rgb(244,202,6)" rx="2" ry="2" />
+<text  x="875.84" y="399.5" >do_syscall_64</text>
+</g>
+<g >
+<title>call_timer_fn (1 samples, 0.02%)</title><rect x="867.6" y="485" width="0.3" height="15.0" fill="rgb(214,7,25)" rx="2" ry="2" />
+<text  x="870.64" y="495.5" ></text>
+</g>
+<g >
+<title>main (4,227 samples, 88.69%)</title><rect x="143.2" y="597" width="1046.6" height="15.0" fill="rgb(245,56,33)" rx="2" ry="2" />
+<text  x="146.20" y="607.5" >main</text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;zmq::blob_t, std::pair&lt;zmq::blob_t const, zmq::routing_socket_base_t::out_pipe_t&gt;, std::_Select1st&lt;std::pair&lt;zmq::blob_t const, zmq::routing_socket_base_t::out_pipe_t&gt; &gt;, std::less&lt;zmq::blob_t&gt;, std::allocator&lt;std::pair&lt;zmq::blob_t const, zmq::routing_socket_base_t::out_pipe_t&gt; &gt; &gt;::_M_lower_bound (1 samples, 0.02%)</title><rect x="868.9" y="453" width="0.2" height="15.0" fill="rgb(223,59,1)" rx="2" ry="2" />
+<text  x="871.88" y="463.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (1 samples, 0.02%)</title><rect x="81.6" y="341" width="0.2" height="15.0" fill="rgb(220,71,47)" rx="2" ry="2" />
+<text  x="84.55" y="351.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (1 samples, 0.02%)</title><rect x="10.0" y="613" width="0.2" height="15.0" fill="rgb(209,125,31)" rx="2" ry="2" />
+<text  x="13.00" y="623.5" ></text>
+</g>
+<g >
+<title>zmq::atomic_ptr_t&lt;zmq::command_t&gt;::set (1 samples, 0.02%)</title><rect x="1186.5" y="405" width="0.3" height="15.0" fill="rgb(246,118,28)" rx="2" ry="2" />
+<text  x="1189.53" y="415.5" ></text>
+</g>
+<g >
+<title>__lock_text_start (1 samples, 0.02%)</title><rect x="869.9" y="389" width="0.2" height="15.0" fill="rgb(253,61,12)" rx="2" ry="2" />
+<text  x="872.87" y="399.5" ></text>
+</g>
+<g >
+<title>zmq::session_base_t::pull_msg (3 samples, 0.06%)</title><rect x="81.6" y="453" width="0.7" height="15.0" fill="rgb(220,12,13)" rx="2" ry="2" />
+<text  x="84.55" y="463.5" ></text>
+</g>
+<g >
+<title>__GI___libc_write (1 samples, 0.02%)</title><rect x="81.6" y="357" width="0.2" height="15.0" fill="rgb(207,26,32)" rx="2" ry="2" />
+<text  x="84.55" y="367.5" ></text>
+</g>
+<g >
+<title>start_thread (266 samples, 5.58%)</title><rect x="77.3" y="629" width="65.9" height="15.0" fill="rgb(246,0,52)" rx="2" ry="2" />
+<text  x="80.34" y="639.5" >start_t..</text>
+</g>
+<g >
+<title>zmq::ypipe_t&lt;zmq::command_t, 16&gt;::check_read (1 samples, 0.02%)</title><rect x="80.8" y="517" width="0.3" height="15.0" fill="rgb(250,153,53)" rx="2" ry="2" />
+<text  x="83.81" y="527.5" ></text>
+</g>
+<g >
+<title>zmq::atomic_ptr_t&lt;zmq::command_t&gt;::cas (1 samples, 0.02%)</title><rect x="1186.3" y="421" width="0.2" height="15.0" fill="rgb(251,220,47)" rx="2" ry="2" />
+<text  x="1189.29" y="431.5" ></text>
+</g>
+<g >
+<title>zmq::object_t::send_command (1,272 samples, 26.69%)</title><rect x="872.3" y="469" width="315.0" height="15.0" fill="rgb(231,27,29)" rx="2" ry="2" />
+<text  x="875.35" y="479.5" >zmq::object_t::send_command</text>
+</g>
+<g >
+<title>usb_hcd_poll_rh_status (1 samples, 0.02%)</title><rect x="867.6" y="453" width="0.3" height="15.0" fill="rgb(227,149,51)" rx="2" ry="2" />
+<text  x="870.64" y="463.5" ></text>
+</g>
+<g >
+<title>ip_local_deliver (267 samples, 5.60%)</title><rect x="11.0" y="181" width="66.1" height="15.0" fill="rgb(217,210,16)" rx="2" ry="2" />
+<text  x="13.99" y="191.5" >ip_loca..</text>
+</g>
+<g >
+<title>zmq::mailbox_t::send (1 samples, 0.02%)</title><rect x="81.6" y="373" width="0.2" height="15.0" fill="rgb(214,62,8)" rx="2" ry="2" />
+<text  x="84.55" y="383.5" ></text>
+</g>
+<g >
+<title>zmq::encoder_base_t&lt;zmq::v3_1_encoder_t&gt;::encode (1 samples, 0.02%)</title><rect x="81.3" y="469" width="0.3" height="15.0" fill="rgb(239,7,9)" rx="2" ry="2" />
+<text  x="84.31" y="479.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (240 samples, 5.04%)</title><rect x="83.3" y="421" width="59.4" height="15.0" fill="rgb(253,195,34)" rx="2" ry="2" />
+<text  x="86.29" y="431.5" >entry_..</text>
+</g>
+<g >
+<title>__wake_up_common_lock (266 samples, 5.58%)</title><rect x="11.0" y="53" width="65.8" height="15.0" fill="rgb(232,177,51)" rx="2" ry="2" />
+<text  x="13.99" y="63.5" >__wake_..</text>
+</g>
+<g >
+<title>zmq::ypipe_t&lt;zmq::command_t, 16&gt;::read (1 samples, 0.02%)</title><rect x="80.8" y="533" width="0.3" height="15.0" fill="rgb(217,210,42)" rx="2" ry="2" />
+<text  x="83.81" y="543.5" ></text>
+</g>
+<g >
+<title>rw_verify_area (1 samples, 0.02%)</title><rect x="1185.5" y="341" width="0.3" height="15.0" fill="rgb(246,106,48)" rx="2" ry="2" />
+<text  x="1188.54" y="351.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range (5 samples, 0.10%)</title><rect x="78.1" y="501" width="1.2" height="15.0" fill="rgb(206,73,37)" rx="2" ry="2" />
+<text  x="81.09" y="511.5" ></text>
+</g>
+<g >
+<title>std::atomic&lt;zmq::msg_t*&gt;::operator= (1 samples, 0.02%)</title><rect x="143.0" y="469" width="0.2" height="15.0" fill="rgb(218,30,7)" rx="2" ry="2" />
+<text  x="145.95" y="479.5" ></text>
+</g>
+<g >
+<title>zmq::rep_t::xrecv (4 samples, 0.08%)</title><rect x="868.1" y="533" width="1.0" height="15.0" fill="rgb(241,207,4)" rx="2" ry="2" />
+<text  x="871.14" y="543.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,228 samples, 88.71%)</title><rect x="143.2" y="629" width="1046.8" height="15.0" fill="rgb(213,173,40)" rx="2" ry="2" />
+<text  x="146.20" y="639.5" >[unknown]</text>
+</g>
+<g >
+<title>zmq::msg_t::check (1 samples, 0.02%)</title><rect x="81.3" y="421" width="0.3" height="15.0" fill="rgb(207,26,16)" rx="2" ry="2" />
+<text  x="84.31" y="431.5" ></text>
+</g>
+<g >
+<title>zmq::atomic_ptr_t&lt;zmq::msg_t&gt;::cas (1 samples, 0.02%)</title><rect x="82.0" y="389" width="0.3" height="15.0" fill="rgb(224,120,2)" rx="2" ry="2" />
+<text  x="85.05" y="399.5" ></text>
+</g>
+<g >
+<title>zmq::atomic_ptr_t&lt;zmq::msg_t&gt;::set (1 samples, 0.02%)</title><rect x="143.0" y="485" width="0.2" height="15.0" fill="rgb(243,138,8)" rx="2" ry="2" />
+<text  x="145.95" y="495.5" ></text>
+</g>
+<g >
+<title>zmq::stream_engine_base_t::out_event (4 samples, 0.08%)</title><rect x="81.3" y="485" width="1.0" height="15.0" fill="rgb(228,31,51)" rx="2" ry="2" />
+<text  x="84.31" y="495.5" ></text>
+</g>
+<g >
+<title>zmq::ypipe_t&lt;zmq::msg_t, 256&gt;::check_read (1 samples, 0.02%)</title><rect x="82.0" y="405" width="0.3" height="15.0" fill="rgb(236,79,13)" rx="2" ry="2" />
+<text  x="85.05" y="415.5" ></text>
+</g>
+<g >
+<title>__fget_light (1 samples, 0.02%)</title><rect x="77.1" y="517" width="0.2" height="15.0" fill="rgb(245,87,24)" rx="2" ry="2" />
+<text  x="80.10" y="527.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;zmq::epoll_t::poll_entry_t*, std::allocator&lt;zmq::epoll_t::poll_entry_t*&gt; &gt;::clear (1 samples, 0.02%)</title><rect x="80.1" y="565" width="0.2" height="15.0" fill="rgb(249,57,48)" rx="2" ry="2" />
+<text  x="83.07" y="575.5" ></text>
+</g>
+<g >
+<title>__softirqentry_text_start (2 samples, 0.04%)</title><rect x="867.4" y="517" width="0.5" height="15.0" fill="rgb(231,31,1)" rx="2" ry="2" />
+<text  x="870.39" y="527.5" ></text>
+</g>
+<g >
+<title>getpid (1 samples, 0.02%)</title><rect x="1189.0" y="501" width="0.3" height="15.0" fill="rgb(238,181,42)" rx="2" ry="2" />
+<text  x="1192.01" y="511.5" ></text>
+</g>
+<g >
+<title>zmq::msg_t::init_size (1 samples, 0.02%)</title><rect x="82.5" y="469" width="0.3" height="15.0" fill="rgb(214,170,40)" rx="2" ry="2" />
+<text  x="85.54" y="479.5" ></text>
+</g>
+<g >
+<title>__schedule (1 samples, 0.02%)</title><rect x="870.1" y="357" width="0.3" height="15.0" fill="rgb(205,165,14)" rx="2" ry="2" />
+<text  x="873.12" y="367.5" ></text>
+</g>
+<g >
+<title>__tcp_push_pending_frames (270 samples, 5.67%)</title><rect x="10.2" y="469" width="66.9" height="15.0" fill="rgb(232,19,10)" rx="2" ry="2" />
+<text  x="13.25" y="479.5" >__tcp_p..</text>
+</g>
+<g >
+<title>__local_bh_enable_ip (267 samples, 5.60%)</title><rect x="11.0" y="341" width="66.1" height="15.0" fill="rgb(251,4,36)" rx="2" ry="2" />
+<text  x="13.99" y="351.5" >__local..</text>
+</g>
+<g >
+<title>zmq::ypipe_t&lt;zmq::command_t, 16&gt;::flush (1 samples, 0.02%)</title><rect x="1186.5" y="421" width="0.3" height="15.0" fill="rgb(209,144,4)" rx="2" ry="2" />
+<text  x="1189.53" y="431.5" ></text>
+</g>
+<g >
+<title>zmq::mailbox_t::recv (3 samples, 0.06%)</title><rect x="80.3" y="549" width="0.8" height="15.0" fill="rgb(214,150,40)" rx="2" ry="2" />
+<text  x="83.31" y="559.5" ></text>
+</g>
+<g >
+<title>do_softirq_own_stack (267 samples, 5.60%)</title><rect x="11.0" y="309" width="66.1" height="15.0" fill="rgb(217,94,2)" rx="2" ry="2" />
+<text  x="13.99" y="319.5" >do_soft..</text>
+</g>
+<g >
+<title>iptable_filter_hook (1 samples, 0.02%)</title><rect x="76.8" y="149" width="0.3" height="15.0" fill="rgb(245,180,19)" rx="2" ry="2" />
+<text  x="79.85" y="159.5" ></text>
+</g>
+<g >
+<title>__libc_send (271 samples, 5.69%)</title><rect x="10.2" y="629" width="67.1" height="15.0" fill="rgb(206,74,24)" rx="2" ry="2" />
+<text  x="13.25" y="639.5" >__libc_..</text>
+</g>
+<g >
+<title>sys_epoll_wait (8 samples, 0.17%)</title><rect x="77.6" y="533" width="2.0" height="15.0" fill="rgb(245,125,20)" rx="2" ry="2" />
+<text  x="80.59" y="543.5" ></text>
+</g>
+<g >
+<title>zmq::atomic_ptr_t&lt;zmq::msg_t&gt;::set (1 samples, 0.02%)</title><rect x="1187.5" y="469" width="0.3" height="15.0" fill="rgb(242,68,12)" rx="2" ry="2" />
+<text  x="1190.52" y="479.5" ></text>
+</g>
+<g >
+<title>zmq::io_thread_t::in_event (8 samples, 0.17%)</title><rect x="80.3" y="565" width="2.0" height="15.0" fill="rgb(240,135,44)" rx="2" ry="2" />
+<text  x="83.31" y="575.5" ></text>
+</g>
+<g >
+<title>fput (1 samples, 0.02%)</title><rect x="77.3" y="533" width="0.3" height="15.0" fill="rgb(228,205,29)" rx="2" ry="2" />
+<text  x="80.34" y="543.5" ></text>
+</g>
+<g >
+<title>zmq::pipe_t::read (1 samples, 0.02%)</title><rect x="868.1" y="485" width="0.3" height="15.0" fill="rgb(242,92,2)" rx="2" ry="2" />
+<text  x="871.14" y="495.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (1 samples, 0.02%)</title><rect x="81.6" y="325" width="0.2" height="15.0" fill="rgb(212,114,10)" rx="2" ry="2" />
+<text  x="84.55" y="335.5" ></text>
+</g>
+<g >
+<title>[libc-2.23.so] (3 samples, 0.06%)</title><rect x="869.6" y="501" width="0.8" height="15.0" fill="rgb(234,125,7)" rx="2" ry="2" />
+<text  x="872.62" y="511.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to zmq::stream_engine_base_t::restart_output (1 samples, 0.02%)</title><rect x="81.1" y="517" width="0.2" height="15.0" fill="rgb(237,105,33)" rx="2" ry="2" />
+<text  x="84.06" y="527.5" ></text>
+</g>
+<g >
+<title>zmq::mailbox_t::send (240 samples, 5.04%)</title><rect x="83.3" y="453" width="59.4" height="15.0" fill="rgb(249,35,6)" rx="2" ry="2" />
+<text  x="86.29" y="463.5" >zmq::m..</text>
+</g>
+<g >
+<title>std::atomic&lt;zmq::command_t*&gt;::compare_exchange_strong (1 samples, 0.02%)</title><rect x="80.8" y="485" width="0.3" height="15.0" fill="rgb(244,75,41)" rx="2" ry="2" />
+<text  x="83.81" y="495.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;zmq::blob_t, std::pair&lt;zmq::blob_t const, zmq::routing_socket_base_t::out_pipe_t&gt;, std::_Select1st&lt;std::pair&lt;zmq::blob_t const, zmq::routing_socket_base_t::out_pipe_t&gt; &gt;, std::less&lt;zmq::blob_t&gt;, std::allocator&lt;std::pair&lt;zmq::blob_t const, zmq::routing_socket_base_t::out_pipe_t&gt; &gt; &gt;::find (1 samples, 0.02%)</title><rect x="868.9" y="469" width="0.2" height="15.0" fill="rgb(206,143,11)" rx="2" ry="2" />
+<text  x="871.88" y="479.5" ></text>
+</g>
+<g >
+<title>zmq::object_t::send_activate_read (1 samples, 0.02%)</title><rect x="871.6" y="501" width="0.3" height="15.0" fill="rgb(207,229,38)" rx="2" ry="2" />
+<text  x="874.60" y="511.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (271 samples, 5.69%)</title><rect x="10.2" y="597" width="67.1" height="15.0" fill="rgb(223,28,14)" rx="2" ry="2" />
+<text  x="13.25" y="607.5" >do_sysc..</text>
+</g>
+<g >
+<title>s_recvmsg (9 samples, 0.19%)</title><rect x="868.1" y="565" width="2.3" height="15.0" fill="rgb(219,136,47)" rx="2" ry="2" />
+<text  x="871.14" y="575.5" ></text>
+</g>
+<g >
+<title>remove_wait_queue (1 samples, 0.02%)</title><rect x="869.9" y="405" width="0.2" height="15.0" fill="rgb(214,3,8)" rx="2" ry="2" />
+<text  x="872.87" y="415.5" ></text>
+</g>
+<g >
+<title>zmq::pipe_t::read (3 samples, 0.06%)</title><rect x="81.6" y="437" width="0.7" height="15.0" fill="rgb(250,126,0)" rx="2" ry="2" />
+<text  x="84.55" y="447.5" ></text>
+</g>
+<g >
+<title>tcp_v4_rcv (266 samples, 5.58%)</title><rect x="11.0" y="149" width="65.8" height="15.0" fill="rgb(243,210,49)" rx="2" ry="2" />
+<text  x="13.99" y="159.5" >tcp_v4_..</text>
+</g>
+<g >
+<title>vfs_write (1,263 samples, 26.50%)</title><rect x="873.1" y="357" width="312.7" height="15.0" fill="rgb(224,29,45)" rx="2" ry="2" />
+<text  x="876.09" y="367.5" >vfs_write</text>
+</g>
+<g >
+<title>zmq::pipe_t::write (2 samples, 0.04%)</title><rect x="1187.8" y="501" width="0.5" height="15.0" fill="rgb(208,53,40)" rx="2" ry="2" />
+<text  x="1190.77" y="511.5" ></text>
+</g>
+<g >
+<title>zmq::signaler_t::send (1 samples, 0.02%)</title><rect x="1187.0" y="437" width="0.3" height="15.0" fill="rgb(220,133,51)" rx="2" ry="2" />
+<text  x="1190.03" y="447.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_core (267 samples, 5.60%)</title><rect x="11.0" y="229" width="66.1" height="15.0" fill="rgb(233,186,24)" rx="2" ry="2" />
+<text  x="13.99" y="239.5" >__netif..</text>
+</g>
+<g >
+<title>apparmor_socket_recvmsg (1 samples, 0.02%)</title><rect x="10.0" y="517" width="0.2" height="15.0" fill="rgb(225,192,46)" rx="2" ry="2" />
+<text  x="13.00" y="527.5" ></text>
+</g>
+<g >
+<title>zmq::session_base_t::read_activated (4 samples, 0.08%)</title><rect x="81.3" y="517" width="1.0" height="15.0" fill="rgb(232,92,54)" rx="2" ry="2" />
+<text  x="84.31" y="527.5" ></text>
+</g>
+<g >
+<title>std::__atomic_base&lt;zmq::msg_t*&gt;::operator= (1 samples, 0.02%)</title><rect x="1187.5" y="437" width="0.3" height="15.0" fill="rgb(253,217,42)" rx="2" ry="2" />
+<text  x="1190.52" y="447.5" ></text>
+</g>
+<g >
+<title>uhci_hub_status_data (1 samples, 0.02%)</title><rect x="867.6" y="437" width="0.3" height="15.0" fill="rgb(229,97,20)" rx="2" ry="2" />
+<text  x="870.64" y="447.5" ></text>
+</g>
+<g >
+<title>__lock_text_start (266 samples, 5.58%)</title><rect x="11.0" y="37" width="65.8" height="15.0" fill="rgb(222,41,11)" rx="2" ry="2" />
+<text  x="13.99" y="47.5" >__lock_..</text>
+</g>
+<g >
+<title>ip_local_out (269 samples, 5.64%)</title><rect x="10.5" y="405" width="66.6" height="15.0" fill="rgb(223,181,30)" rx="2" ry="2" />
+<text  x="13.50" y="415.5" >ip_loca..</text>
+</g>
+<g >
+<title>zmq::ypipe_t&lt;zmq::msg_t, 256&gt;::read (1 samples, 0.02%)</title><rect x="82.0" y="421" width="0.3" height="15.0" fill="rgb(249,176,36)" rx="2" ry="2" />
+<text  x="85.05" y="431.5" ></text>
+</g>
+<g >
+<title>eventfd_write (1 samples, 0.02%)</title><rect x="81.6" y="261" width="0.2" height="15.0" fill="rgb(213,34,34)" rx="2" ry="2" />
+<text  x="84.55" y="271.5" ></text>
+</g>
+<g >
+<title>zmq::socket_base_t::process_commands (3 samples, 0.06%)</title><rect x="1188.5" y="533" width="0.8" height="15.0" fill="rgb(234,108,48)" rx="2" ry="2" />
+<text  x="1191.51" y="543.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (2 samples, 0.04%)</title><rect x="869.9" y="485" width="0.5" height="15.0" fill="rgb(243,77,19)" rx="2" ry="2" />
+<text  x="872.87" y="495.5" ></text>
+</g>
+<g >
+<title>__GI___libc_write (1,264 samples, 26.52%)</title><rect x="872.8" y="421" width="313.0" height="15.0" fill="rgb(215,46,43)" rx="2" ry="2" />
+<text  x="875.84" y="431.5" >__GI___libc_write</text>
+</g>
+<g >
+<title>eventfd_write (240 samples, 5.04%)</title><rect x="83.3" y="341" width="59.4" height="15.0" fill="rgb(232,189,17)" rx="2" ry="2" />
+<text  x="86.29" y="351.5" >eventf..</text>
+</g>
+<g >
+<title>__vfs_write (1 samples, 0.02%)</title><rect x="81.6" y="277" width="0.2" height="15.0" fill="rgb(207,190,2)" rx="2" ry="2" />
+<text  x="84.55" y="287.5" ></text>
+</g>
+<g >
+<title>ip_finish_output (268 samples, 5.62%)</title><rect x="10.7" y="373" width="66.4" height="15.0" fill="rgb(208,154,5)" rx="2" ry="2" />
+<text  x="13.74" y="383.5" >ip_fini..</text>
+</g>
+<g >
+<title>[libc-2.23.so] (1 samples, 0.02%)</title><rect x="80.3" y="533" width="0.3" height="15.0" fill="rgb(207,57,19)" rx="2" ry="2" />
+<text  x="83.31" y="543.5" ></text>
+</g>
+<g >
+<title>__lock_text_start (1 samples, 0.02%)</title><rect x="77.6" y="501" width="0.2" height="15.0" fill="rgb(251,227,31)" rx="2" ry="2" />
+<text  x="80.59" y="511.5" ></text>
+</g>
+</g>
+</svg>

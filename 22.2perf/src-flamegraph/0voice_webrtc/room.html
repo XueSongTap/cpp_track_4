@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>VoiceRTC</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<link rel="icon" href="images/app_57x57.png" type="image/x-icon"/>
+<link href="style/common.css" rel="stylesheet" type="text/css" />
+<link href="style/video.css" rel="stylesheet" type="text/css" />
+<link href="style/sweetalert.css" rel="stylesheet" type="text/css" />
+<script type="text/javascript" src="js/jquery-2.1.3.min.js"></script>
+<script type="text/javascript" src="js/sweetalert.min.js"></script>
+<script type="text/javascript" src="config.js?v=20180817"></script>
+<script type="text/javascript" src="js/util.js?v=20180817"></script>
+<script type="text/javascript" src="js/common.js?v=20180412"></script>
+<!-- <script type="text/javascript" src="js/vconsole.min.js"></script> -->
+<script type="text/javascript" src="js/voice-rtc-1.0.js?v=20190703"></script>
+
+</head>
+<body>
+    <p style="font-size:30px;text-align:center;color:white">零声学院 音视频通话项目</p>
+	<div class="voice-main" id="voice-main">
+		<div id="voice-videoarea">
+			<!-- 视频主窗口 -->
+			<div id="voice-mainVideo"></div>
+			<!-- 视频成员 -->
+			<div id="voice-subarea">
+				<i class="voice-prev"><img src="images/prev.gif"></i>
+				<i class="voice-next"><img src="images/next.gif"></i>
+				<div id="voice-slide">
+					<ul id="voice-subVideo">
+					</ul>
+				</div>
+			</div>
+			<!-- 通知区域 -->
+			<div class="voice-noticearea">
+				<img src="images/notice.png">
+				<span id="voice-room"></span>
+				<span id="voice-timer"></span>
+				<span id="voice-tip"></span>
+			</div>
+			<!-- 视频按钮 -->
+			<div class="voice-btnarea">
+				<ul>
+					<li><a id="voice-btn-camera" class="voice-btn-camera"></a></li>
+					<li><a id="voice-btn-mute" class="voice-btn-mute"></a></li>
+					<li><a id="voice-btn-hangup" class="voice-btn-hangup"></a></li>
+					<li><a id="voice-btn-voice" class="voice-btn-voice"></a></li>
+				</ul>
+			</div>
+		</div>
+	</div>
+	
+	<script src = "js/video.js"></script>
+</body>
+</html>

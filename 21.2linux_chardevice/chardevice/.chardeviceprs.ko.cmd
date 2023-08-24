@@ -1,0 +1,1 @@
+cmd_/home/vico/Desktop/chardevice/chardeviceprs.ko := ld -r -m elf_x86_64  -z max-page-size=0x200000  --build-id  -T ./scripts/module-common.lds -o /home/vico/Desktop/chardevice/chardeviceprs.ko /home/vico/Desktop/chardevice/chardeviceprs.o /home/vico/Desktop/chardevice/chardeviceprs.mod.o;  true

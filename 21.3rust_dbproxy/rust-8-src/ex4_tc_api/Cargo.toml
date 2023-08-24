@@ -1,0 +1,18 @@
+[package]
+name = "ex4_tc_api"
+version = "0.2.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hyper = { version = "0.14", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = { version = "0.3", default-features = false }
+serde = { version = "1.0.117", features = ["derive"] }
+serde_json = "1.0.59"
+sqlx = { version = "0.5", features = [ "runtime-tokio-native-tls" , "mysql" ] }
+# uid生成
+guid-create = "0.2.0"
+[dependencies.redis]
+version = "*"

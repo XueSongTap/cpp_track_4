@@ -1,0 +1,26 @@
+[package]
+name = "sqlx_user_crud"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# actix-web = "4"
+# actix-rt = "2"
+# sqlx = { version = "0.5", features = ["mysql"] }
+# serde = "1"
+# serde_json = "1.0"
+# uuid = { version = "1", features = ["serde", "v4"] }
+actix-web = "3"
+actix-rt = "1.1.1"
+# sqlx is currently on version 0.3.5 in this project due to breaking changes introduced in versions
+# beyond 0.4.0, which changed the return type of 'exectute' to a 'Done'. Also the row parsing related
+# traits have been altered. The overall architecture of this CRUD can still be reproduced with a
+# newer version of sqlx, and the version will be updated in the future.
+sqlx = { version = "0.3.5", features = ["mysql"] }
+serde = "1.0.117"
+serde_json = "1.0"
+uuid = { version = "0.8.1", features = ["serde", "v4"] }
+mini-redis = "0.4"
+tokio = { version = "1", features = ["full"] }

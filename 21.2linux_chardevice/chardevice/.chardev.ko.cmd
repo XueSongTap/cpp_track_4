@@ -1,0 +1,1 @@
+cmd_/home/vico/Desktop/chardevice/chardev.ko := ld -r -m elf_x86_64  -z max-page-size=0x200000  --build-id  -T ./scripts/module-common.lds -o /home/vico/Desktop/chardevice/chardev.ko /home/vico/Desktop/chardevice/chardev.o /home/vico/Desktop/chardevice/chardev.mod.o;  true
